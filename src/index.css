@@ -2,22 +2,21 @@
 
 :root {
   font-family: 'DM Sans', 'Noto Sans SC', sans-serif;
-  color: #242923;
-  background: #f5f3ed;
+  color: var(--ink);
+  background: var(--bg);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  font-optical-sizing: auto;
   font-weight: 400;
 
-  --ink: #242923;
-  --muted: #85877e;
-  --line: #e7e4db;
-  --paper: #fffefa;
-  --green: #506b50;
-  --green-dark: #344b39;
-  --lime: #d9e3a5;
+  --ink: #1d211e;
+  --paper: #fbfbf8;
+  --bg: #efefea;
+  --hair: #c9cbc3;
+  --mute: #7d8078;
+  --accent: #2f7d5b;
+  --accent-soft: #dcefe4;
   --mono: 'DM Mono', monospace;
 }
 
@@ -32,7 +31,7 @@ body {
 button, input, textarea { font: inherit; }
 button { cursor: pointer; }
 
-::selection { color: var(--ink); background: #d9e3a5; }
+::selection { color: var(--ink); background: var(--accent-soft); }
 
 .sr-only {
   position: absolute;

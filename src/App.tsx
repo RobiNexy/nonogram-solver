@@ -1,4 +1,5 @@
 import {
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -13,11 +14,23 @@ import {
   type CellState,
   type Puzzle,
 } from './solver';
+import {
+  getCrosshairInfo,
+  type CrosshairInfo,
+  type HoveredCell,
+} from './crosshair';
 import { parseWebsitePuzzleHtml } from './website-import';
+import { SolveReplay } from './replay';
 import './App.css';
 
 const SAMPLE_CLUES = ['1', '3', '5', '3', '1'] as const;
 const MIN_DIMENSION = 1;
+const CLUE_LINE_HEIGHT = 1.15;
+const BOARD_PADDING = 24;
+const MAX_CELL_SIZE = 72;
+const TOOLTIP_WIDTH = 116;
+const PLAYBACK_INTERVAL_MS = 50;
+const PLAYBACK_TICKS = 120;
 
 type SolveMessage =
   | { readonly kind: 'solved'; readonly nodes: number }
@@ -104,6 +117,10 @@ function cluePartCount(text: string): number {
   return trimmed === '' ? 1 : trimmed.split(/[\s,，]+/u).length;
 }
 
+function toStackedClue(text: string): string {
+  return text.replace(/[\s,，]+/gu, '\n');
+}
+
 export default function App() {
   const [width, setWidth] = useState(5);
   const [height, setHeight] = useState(5);
@@ -115,45 +132,42 @@ export default function App() {
   const [message, setMessage] = useState<SolveMessage | null>(null);
   const [websiteHtml, setWebsiteHtml] = useState('');
   const [importFeedback, setImportFeedback] = useState<ImportFeedback | null>(null);
-  const [importPanelOpen, setImportPanelOpen] = useState(false);
-  const boardViewportRef = useRef<HTMLDivElement>(null);
+  const [hoveredCell, setHoveredCell] = useState<HoveredCell | null>(null);
+  const [solveCount, setSolveCount] = useState(0);
+  const [replay, setReplay] = useState<SolveReplay | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [, setReplayTick] = useState(0);
+  const boardAreaRef = useRef<HTMLDivElement>(null);
   const [boardMetrics, setBoardMetrics] = useState<BoardMetrics>(INITIAL_BOARD_METRICS);
-  const compactBoard = Math.max(width, height) >= 20;
   const maxColumnClueParts = Math.min(
     Math.ceil(height / 2),
     Math.max(1, ...columnInputs.map(cluePartCount)),
   );
 
   useLayoutEffect(() => {
-    const viewport = boardViewportRef.current;
-    if (viewport === null) {
+    const area = boardAreaRef.current;
+    if (area === null) {
       return;
     }
 
     const measure = (): void => {
-      const frameWidth = viewport.clientWidth;
-      const viewportRect = viewport.getBoundingClientRect();
-      const documentTop = viewportRect.top + window.scrollY;
+      const frameWidth = area.clientWidth - BOARD_PADDING * 2;
+      const frameHeight = area.clientHeight - BOARD_PADDING * 2;
       const rowClueWidth = width >= 40 ? 42 : width >= 20 ? 50 : 64;
       const widthLimit = Math.max(2, (frameWidth - rowClueWidth - 2) / width);
-      const heightBudget = Math.max(80, window.innerHeight - documentTop - 190);
-      let cellSize = Math.min(48, widthLimit, heightBudget / height);
-      let columnHeaderHeight = 14;
+      const heightBudget = Math.max(80, frameHeight);
+      const clueFontFor = (size: number): number => Math.max(3, Math.min(10, size * 0.58));
+      const headerFor = (size: number): number =>
+        Math.max(14, maxColumnClueParts * clueFontFor(size) * CLUE_LINE_HEIGHT + 6);
 
+      let cellSize = Math.min(MAX_CELL_SIZE, widthLimit, heightBudget / height);
       for (let iteration = 0; iteration < 3; iteration += 1) {
-        const clueLineHeight = Math.max(3.5, Math.min(10, cellSize * 0.62));
-        columnHeaderHeight = Math.max(14, maxColumnClueParts * clueLineHeight + 6);
-        cellSize = Math.min(
-          48,
-          widthLimit,
-          (heightBudget - columnHeaderHeight) / height,
-        );
+        cellSize = Math.min(MAX_CELL_SIZE, widthLimit, (heightBudget - headerFor(cellSize)) / height);
       }
 
       cellSize = Math.max(2, cellSize);
-      const clueFontSize = Math.max(3, Math.min(10, cellSize * 0.58));
-      const clueLineHeight = Math.max(3.5, Math.min(10, cellSize * 0.62));
-      columnHeaderHeight = Math.max(14, maxColumnClueParts * clueLineHeight + 6);
+      const clueFontSize = clueFontFor(cellSize);
+      const columnHeaderHeight = headerFor(cellSize);
 
       setBoardMetrics((current) => {
         if (
@@ -169,19 +183,21 @@ export default function App() {
     };
 
     const observer = new ResizeObserver(measure);
-    observer.observe(viewport);
-    window.addEventListener('resize', measure);
+    observer.observe(area);
     measure();
-    return () => {
-      observer.disconnect();
-      window.removeEventListener('resize', measure);
-    };
-  }, [height, importFeedback, importPanelOpen, maxColumnClueParts, width]);
+    return () => observer.disconnect();
+  }, [height, maxColumnClueParts, width]);
 
   const parsed = useMemo(
     () => cluesToPuzzle(width, height, rowInputs, columnInputs),
     [columnInputs, height, rowInputs, width],
   );
+  const displayGrid = replay !== null ? replay.grid : solution;
+  const crosshairInfo =
+    hoveredCell === null || displayGrid === null
+      ? null
+      : getCrosshairInfo(displayGrid, hoveredCell.row, hoveredCell.column);
+  const replaying = replay !== null && !replay.done;
 
   const rowErrors = rowInputs.map((text) => {
     const result = parseClue(text);
@@ -195,27 +211,36 @@ export default function App() {
     );
   });
 
+  const clearSolution = (): void => {
+    setSolution(null);
+    setReplay(null);
+    setPlaying(false);
+  };
+
   const resize = (nextWidth: number, nextHeight: number): void => {
     setWidth(nextWidth);
     setHeight(nextHeight);
     setRowInputs((current) => makeClues(nextHeight, current));
     setColumnInputs((current) => makeClues(nextWidth, current));
-    setSolution(null);
+    clearSolution();
     setMessage(null);
+    setHoveredCell(null);
   };
 
   const updateRowClue = (index: number, value: string): void => {
     setRowInputs((current) => current.map((clue, clueIndex) => (clueIndex === index ? value : clue)));
-    setSolution(null);
+    clearSolution();
     setMessage(null);
+    setHoveredCell(null);
   };
 
   const updateColumnClue = (index: number, value: string): void => {
     setColumnInputs((current) =>
-      current.map((clue, clueIndex) => (clueIndex === index ? value : clue)),
+      current.map((clue, clueIndex) => (clueIndex === index ? toStackedClue(value) : clue)),
     );
-    setSolution(null);
+    clearSolution();
     setMessage(null);
+    setHoveredCell(null);
   };
 
   const handleClueKeyDown = (
@@ -259,8 +284,9 @@ export default function App() {
     setHeight(5);
     setRowInputs(makeClues(5, SAMPLE_CLUES));
     setColumnInputs(makeClues(5, SAMPLE_CLUES));
-    setSolution(null);
+    clearSolution();
     setMessage(null);
+    setHoveredCell(null);
   };
 
   const handleWebsiteImport = (): void => {
@@ -274,18 +300,58 @@ export default function App() {
     setWidth(puzzle.width);
     setHeight(puzzle.height);
     setRowInputs(puzzle.rowClues.map((clues) => clues.join(' ')));
-    setColumnInputs(puzzle.columnClues.map((clues) => clues.join(' ')));
-    setSolution(null);
+    setColumnInputs(puzzle.columnClues.map((clues) => clues.join('\n')));
+    clearSolution();
     setMessage(null);
+    setHoveredCell(null);
     setImportFeedback({
       kind: 'success',
-      text: `已导入 ${puzzle.width} × ${puzzle.height} 题目线索，可以开始求解。`,
+      text: `已导入 ${puzzle.width} × ${puzzle.height} 题目线索。`,
     });
+  };
+
+  useEffect(() => {
+    if (replay === null || !playing) {
+      return undefined;
+    }
+    const stepsPerTick = Math.max(1, Math.ceil(replay.total / PLAYBACK_TICKS));
+    const timer = window.setInterval(() => {
+      replay.advance(stepsPerTick);
+      setReplayTick((tick) => tick + 1);
+      if (replay.done) {
+        setPlaying(false);
+      }
+    }, PLAYBACK_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [playing, replay]);
+
+  const toggleReplay = (): void => {
+    if (replay === null) {
+      return;
+    }
+    if (replay.done) {
+      replay.restart();
+      setPlaying(true);
+    } else {
+      setPlaying((value) => !value);
+    }
+    setReplayTick((tick) => tick + 1);
+  };
+
+  const skipReplay = (): void => {
+    if (replay === null) {
+      return;
+    }
+    replay.finish();
+    setPlaying(false);
+    setReplayTick((tick) => tick + 1);
   };
 
   const handleSolve = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
-    setSolution(null);
+    clearSolution();
+    setHoveredCell(null);
+    setSolveCount((count) => count + 1);
 
     if (parsed.puzzle === null) {
       setMessage({ kind: 'invalid', text: parsed.error ?? '请检查输入的线索。' });
@@ -293,6 +359,11 @@ export default function App() {
     }
 
     const result = solvePuzzle(parsed.puzzle);
+    if (result.status !== 'invalid-puzzle' && result.trace.complete) {
+      const nextReplay = new SolveReplay(parsed.puzzle.height, parsed.puzzle.width, result.trace.steps);
+      setReplay(nextReplay);
+      setPlaying(!nextReplay.done);
+    }
     switch (result.status) {
       case 'solved':
         setSolution(result.grid);
@@ -312,67 +383,45 @@ export default function App() {
 
   const messageText =
     message === null ? null : { ...formatMessage(message), kind: message.kind };
+  const statusText =
+    replaying && replay !== null
+      ? replay.caption
+      : messageText === null
+        ? ''
+        : messageText.detail === ''
+          ? messageText.title
+          : `${messageText.title} · ${messageText.detail}`;
+  const statusTone =
+    !replaying && (message?.kind === 'unsatisfiable' || message?.kind === 'invalid')
+      ? 'conflict'
+      : 'plain';
+  const lineWeight = Math.max(0.6, Math.min(1.2, boardMetrics.cellSize * 0.035));
   const boardStyle = {
     gridTemplateColumns: `${boardMetrics.rowClueWidth}px repeat(${width}, ${boardMetrics.cellSize}px)`,
     gridTemplateRows: `${boardMetrics.columnHeaderHeight}px repeat(${height}, ${boardMetrics.cellSize}px)`,
     '--cell-size': `${boardMetrics.cellSize}px`,
     '--clue-font-size': `${boardMetrics.clueFontSize}px`,
+    '--line-cell': `${lineWeight}px`,
+    '--line-mid': `${lineWeight * 2}px`,
+    '--line-outer': `${lineWeight * 3}px`,
   } as CSSProperties;
 
   return (
-    <main className={`page-shell${compactBoard ? ' page-shell-compact' : ''}`}>
-      <header className="topbar">
-        <a className="wordmark" href="#top" aria-label="数织求解器首页">
-          <span className="wordmark-mark" aria-hidden="true">
+    <main className="app">
+      <header className="app-header">
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true">
             <i />
             <i />
             <i />
             <i />
           </span>
-          <span>GRID / LOGIC</span>
-        </a>
-        <span className="topbar-note">NONOGRAM STUDIO&nbsp; · &nbsp;BETA</span>
-      </header>
-
-      <section className="hero" id="top">
-        <div className="hero-copy">
-          <p className="eyebrow"><span /> 逻辑，逐格显现</p>
           <h1>数织求解器</h1>
-          <p className="hero-description">
-            输入行列线索，让约束传播与回溯找到答案。
-            <br className="desktop-break" />
-            空白线索代表该行或列全部留白。
-          </p>
         </div>
-        <div className="hero-stamp" aria-hidden="true">
-          <span>PUZZLE</span>
-          <strong>01</strong>
-          <span>FIND THE PATTERN</span>
-        </div>
-      </section>
-
-      <form className="workspace" onSubmit={handleSolve}>
-        <div className="workspace-heading">
-          <div>
-            <p className="section-kicker">01 / PUZZLE SETUP</p>
-            <h2>设置题目</h2>
-          </div>
-          <button className="text-button" type="button" onClick={resetSample}>
-            <span aria-hidden="true">↺</span> 恢复示例
-          </button>
-        </div>
-
-        <section className="dimension-bar" aria-label="棋盘尺寸">
-          <div className="dimension-copy">
-            <span className="dimension-icon" aria-hidden="true">▦</span>
-            <div>
-              <strong>棋盘尺寸</strong>
-              <small>可调整为 1–{MAX_PUZZLE_DIMENSION} 格</small>
-            </div>
-          </div>
-          <div className="dimension-fields">
+        <div className="header-tools">
+          <div className="dimension-fields" role="group" aria-label="棋盘尺寸">
             <label>
-              <span>宽</span>
+              <span className="sr-only">宽</span>
               <input
                 aria-label="棋盘宽度"
                 type="number"
@@ -393,7 +442,7 @@ export default function App() {
             </label>
             <span className="dimension-cross" aria-hidden="true">×</span>
             <label>
-              <span>高</span>
+              <span className="sr-only">高</span>
               <input
                 aria-label="棋盘高度"
                 type="number"
@@ -413,51 +462,44 @@ export default function App() {
               />
             </label>
           </div>
-        </section>
+          <button className="text-button" type="button" onClick={resetSample}>
+            恢复示例
+          </button>
+        </div>
+      </header>
 
-        <details
-          className="import-panel"
-          onToggle={(event) => setImportPanelOpen(event.currentTarget.open)}
-        >
-          <summary>从数织网站 HTML 导入</summary>
-          <div className="import-content">
-            <p>粘贴包含 <code>task-row-N</code> 和 <code>task-col-N</code> 的题目页面 HTML。</p>
-            <textarea
-              className="import-source"
-              value={websiteHtml}
-              onChange={(event) => {
-                setWebsiteHtml(event.currentTarget.value);
-                setImportFeedback(null);
-              }}
-              placeholder="在此粘贴网站题目 HTML…"
-              spellCheck={false}
-              aria-label="网站题目 HTML"
-            />
-            <div className="import-actions">
-              <button className="import-button" type="button" onClick={handleWebsiteImport}>
-                解析并导入线索
-              </button>
-              {importFeedback !== null && (
-                <span className={`import-feedback import-feedback-${importFeedback.kind}`} role="status">
-                  {importFeedback.text}
-                </span>
-              )}
-            </div>
+      <details className="import-panel">
+        <summary>从网站 HTML 导入</summary>
+        <div className="import-content">
+          <textarea
+            className="import-source"
+            value={websiteHtml}
+            onChange={(event) => {
+              setWebsiteHtml(event.currentTarget.value);
+              setImportFeedback(null);
+            }}
+            placeholder="在此粘贴网站题目 HTML…"
+            spellCheck={false}
+            aria-label="网站题目 HTML"
+          />
+          <div className="import-actions">
+            <button className="ghost-button" type="button" onClick={handleWebsiteImport}>
+              解析并导入线索
+            </button>
+            {importFeedback !== null && (
+              <span className={`import-feedback import-feedback-${importFeedback.kind}`} role="status">
+                {importFeedback.text}
+              </span>
+            )}
           </div>
-        </details>
+        </div>
+      </details>
 
-        <div className="editor-card">
-          <div className="editor-topline">
-            <div>
-              <h3>填写线索</h3>
-              <p>线索可用空格、英文或中文逗号分隔，例如 <code>3 1</code></p>
-            </div>
-            <span className="board-size-tag">{width} × {height}</span>
-          </div>
-
-          <div className="board-scroll" ref={boardViewportRef} aria-label="数织线索与解答棋盘">
-            <div className="puzzle-grid" style={boardStyle}>
-              <div className="corner-label" aria-hidden="true">列 ↓<br />行 →</div>
+      <form className="workspace" onSubmit={handleSolve}>
+        <div className="board-area" ref={boardAreaRef}>
+          <div className="board-scroll" aria-label="数织线索与解答棋盘">
+            <div key={`${width}x${height}`} className="puzzle-grid" style={boardStyle}>
+              <span aria-hidden="true" />
               {columnInputs.map((value, index) => (
                 <label className="column-clue" key={`column-${index}`}>
                   <span className="sr-only">第 {index + 1} 列线索</span>
@@ -466,6 +508,7 @@ export default function App() {
                     data-clue-kind="column"
                     data-clue-index={index}
                     aria-invalid={columnErrors[index] !== null}
+                    className={crosshairInfo?.column === index ? 'clue-active' : undefined}
                     value={value}
                     rows={cluePartCount(value)}
                     onChange={(event) => updateColumnClue(index, event.currentTarget.value)}
@@ -488,6 +531,7 @@ export default function App() {
                       data-clue-kind="row"
                       data-clue-index={rowIndex}
                       aria-invalid={rowErrors[rowIndex] !== null}
+                      className={crosshairInfo?.row === rowIndex ? 'clue-active' : undefined}
                       value={value}
                       onChange={(event) => updateRowClue(rowIndex, event.currentTarget.value)}
                       onKeyDown={handleClueKeyDown}
@@ -499,53 +543,96 @@ export default function App() {
                     )}
                   </label>
                   {Array.from({ length: width }, (_, columnIndex) => {
-                    const cell = solution?.[rowIndex]?.[columnIndex] ?? 'unknown';
+                    const cell = displayGrid?.[rowIndex]?.[columnIndex] ?? 'unknown';
+                    const isCrosshairOrigin =
+                      crosshairInfo?.row === rowIndex && crosshairInfo.column === columnIndex;
+                    const isLatest =
+                      replay?.latest?.row === rowIndex && replay.latest.column === columnIndex;
+                    const isGuess = replay?.guess[rowIndex]?.[columnIndex] === true;
+                    const positionClasses = [
+                      rowIndex === 0 ? 'board-cell-first-row' : '',
+                      columnIndex === 0 ? 'board-cell-first-column' : '',
+                      rowIndex === height - 1 ? 'board-cell-last-row' : '',
+                      columnIndex === width - 1 ? 'board-cell-last-column' : '',
+                      (rowIndex + 1) % 5 === 0 ? 'board-cell-group-bottom' : '',
+                      (columnIndex + 1) % 5 === 0 ? 'board-cell-group-right' : '',
+                      isLatest ? 'board-cell-latest' : '',
+                      isGuess ? 'board-cell-guess' : '',
+                    ]
+                      .filter((className) => className !== '')
+                      .join(' ');
+                    const revealDelay =
+                      cell === 'unknown' ? 0 : Math.min(1200, (rowIndex + columnIndex) * 22);
+                    const cellStyle = { '--reveal-delay': `${revealDelay}ms` } as CSSProperties;
                     return (
                       <span
-                        className={`board-cell board-cell-${cell}${rowIndex === 0 ? ' board-cell-first-row' : ''}${columnIndex === 0 ? ' board-cell-first-column' : ''}`}
-                        key={`cell-${rowIndex}-${columnIndex}`}
-                        aria-label={cellLabel(rowIndex, columnIndex, cell)}
+                        className={`board-cell board-cell-${cell} ${positionClasses}`}
+                        style={cellStyle}
+                        key={`cell-${solveCount}-${rowIndex}-${columnIndex}`}
+                        aria-label={
+                          isCrosshairOrigin && crosshairInfo !== null
+                            ? `黑格，横向连续 ${crosshairInfo.horizontal.count} 格，纵向连续 ${crosshairInfo.vertical.count} 格`
+                            : cellLabel(rowIndex, columnIndex, cell)
+                        }
+                        onMouseEnter={() =>
+                          setHoveredCell(
+                            cell === 'filled' ? { row: rowIndex, column: columnIndex } : null,
+                          )
+                        }
+                        onMouseLeave={() => setHoveredCell(null)}
                       >
-                        {cell === 'filled' ? <span aria-hidden="true" /> : null}
+                        {cell === 'filled' ? <span className="board-cell-dot" aria-hidden="true" /> : null}
                       </span>
                     );
                   })}
                 </div>
               ))}
+              {crosshairInfo !== null && (
+                <CrossOverlay
+                  info={crosshairInfo}
+                  metrics={boardMetrics}
+                  width={width}
+                  height={height}
+                />
+              )}
             </div>
           </div>
-          <div className="editor-footer">
-            <span className="legend"><i className="legend-filled" />黑格 <i className="legend-empty" />空格</span>
-            <span className="hint">Tab 下一格并清空 · Shift+Tab 上一格并清空</span>
-          </div>
         </div>
 
-        <div className="solve-row">
-          <p className="solve-note">求解器最多搜索 100,000 个分支节点</p>
+        <div className="control-bar">
+          <div className="replay-controls">
+            {replay !== null && (
+              <>
+                <button className="ghost-button" type="button" onClick={toggleReplay}>
+                  {replay.done ? '重播' : playing ? '暂停' : '播放'}
+                </button>
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={skipReplay}
+                  disabled={replay.done}
+                >
+                  跳到结果
+                </button>
+              </>
+            )}
+          </div>
+          <p className={`status status-${statusTone}`} role="status" aria-live="polite">
+            {replaying && (
+              <span className="brand-mark brand-mark-busy" aria-hidden="true">
+                <i />
+                <i />
+                <i />
+                <i />
+              </span>
+            )}
+            <span>{statusText}</span>
+          </p>
           <button className="solve-button" type="submit">
-            <span>开始求解</span><span className="button-arrow" aria-hidden="true">↗</span>
+            开始求解
           </button>
         </div>
-
-        <div className={`result-panel ${message === null ? 'result-idle' : `result-${message.kind}`}`} aria-live="polite">
-          {messageText === null ? (
-            <>
-              <span className="result-icon" aria-hidden="true">✳</span>
-              <span>准备就绪 <small>输入线索后开始求解</small></span>
-            </>
-          ) : (
-            <>
-              <span className="result-icon" aria-hidden="true">{messageText.kind === 'solved' ? '✓' : '!'}</span>
-              <span>{messageText.title}<small>{messageText.detail}</small></span>
-            </>
-          )}
-        </div>
       </form>
-
-      <footer className="page-footer">
-        <span>基于约束满足与有限回溯</span>
-        <span>每一步推理，都有迹可循。</span>
-      </footer>
     </main>
   );
 }
@@ -555,17 +642,14 @@ function formatMessage(message: SolveMessage): { readonly title: string; readonl
     case 'solved':
       return {
         title: '找到可行解',
-        detail: `已完成棋盘 · 搜索 ${message.nodes.toLocaleString('zh-CN')} 个节点`,
+        detail: `搜索 ${message.nodes.toLocaleString('zh-CN')} 个节点`,
       };
     case 'unsatisfiable':
-      return {
-        title: '这组线索无解',
-        detail: `行列约束彼此冲突 · 检查后重试（${message.nodes} 个节点）`,
-      };
+      return { title: '这组线索无解', detail: `搜索 ${message.nodes} 个节点` };
     case 'search-limit':
       return {
         title: '搜索达到上限',
-        detail: `已检查 ${message.nodes.toLocaleString('zh-CN')} 个节点，暂未找到解。`,
+        detail: `已检查 ${message.nodes.toLocaleString('zh-CN')} 个节点`,
       };
     case 'invalid':
       return { title: '请检查输入', detail: message.text };
@@ -575,4 +659,137 @@ function formatMessage(message: SolveMessage): { readonly title: string; readonl
 function cellLabel(row: number, column: number, cell: CellState): string {
   const state = cell === 'filled' ? '黑格' : cell === 'empty' ? '空格' : '待求解';
   return `第 ${row + 1} 行，第 ${column + 1} 列：${state}`;
+}
+
+interface CrossOverlayProps {
+  readonly info: CrosshairInfo;
+  readonly metrics: BoardMetrics;
+  readonly width: number;
+  readonly height: number;
+}
+
+function CrossOverlay({ info, metrics, width, height }: CrossOverlayProps) {
+  const size = metrics.cellSize;
+  const gridWidth = metrics.rowClueWidth + width * size;
+  const gridHeight = metrics.columnHeaderHeight + height * size;
+  const originX = metrics.rowClueWidth + (info.column + 0.5) * size;
+  const originY = metrics.columnHeaderHeight + (info.row + 0.5) * size;
+  const dotSize = Math.max(2, Math.min(6, size * 0.2));
+  const outline = crossOutlinePath(info, metrics);
+  const crossLeft = metrics.rowClueWidth + Math.min(info.horizontal.start, info.column) * size;
+  const crossRight = metrics.rowClueWidth + (Math.max(info.horizontal.end, info.column) + 1) * size;
+  const tooltipGap = 8;
+  const tooltipPlacement: CSSProperties =
+    crossLeft - tooltipGap - TOOLTIP_WIDTH >= 0 && crossRight + tooltipGap + TOOLTIP_WIDTH > gridWidth
+      ? { left: crossLeft - tooltipGap, top: originY, transform: 'translate(-100%, -50%)' }
+      : { left: crossRight + tooltipGap, top: originY, transform: 'translateY(-50%)' };
+
+  return (
+    <>
+      <svg
+        key={`${info.row}-${info.column}`}
+        className="cross-overlay"
+        width={gridWidth}
+        height={gridHeight}
+        viewBox={`0 0 ${gridWidth} ${gridHeight}`}
+        aria-hidden="true"
+      >
+        <defs>
+          <linearGradient id="cross-fill" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stopColor="#3b423b" />
+            <stop offset="1" stopColor="#1d211e" />
+          </linearGradient>
+        </defs>
+        <g className="cross-group" style={{ transformOrigin: `${originX}px ${originY}px` }}>
+          {crossCells(info).map(({ row, column }) => {
+            const x = metrics.rowClueWidth + column * size;
+            const y = metrics.columnHeaderHeight + row * size;
+            return (
+              <g key={`${row}-${column}`}>
+                <rect x={x} y={y} width={size} height={size} fill="url(#cross-fill)" />
+                <rect
+                  x={x + (size - dotSize) / 2}
+                  y={y + (size - dotSize) / 2}
+                  width={dotSize}
+                  height={dotSize}
+                  className="cross-dot"
+                />
+              </g>
+            );
+          })}
+          <path className="cross-outline-base" d={outline} />
+          <path className="cross-outline-trail" d={outline} pathLength={100} />
+          <path className="cross-outline-flow" d={outline} pathLength={100} />
+        </g>
+      </svg>
+      <span className="crosshair-tooltip" style={tooltipPlacement} aria-hidden="true">
+        <span>横向连续 <b>{info.horizontal.count}</b> 格</span>
+        <span>纵向连续 <b>{info.vertical.count}</b> 格</span>
+      </span>
+    </>
+  );
+}
+
+function isCrossCell(info: CrosshairInfo, row: number, column: number): boolean {
+  return (
+    (row === info.row && column >= info.horizontal.start && column <= info.horizontal.end) ||
+    (column === info.column && row >= info.vertical.start && row <= info.vertical.end)
+  );
+}
+
+function crossCells(info: CrosshairInfo): { readonly row: number; readonly column: number }[] {
+  const cells: { row: number; column: number }[] = [];
+  for (let column = info.horizontal.start; column <= info.horizontal.end; column += 1) {
+    cells.push({ row: info.row, column });
+  }
+  for (let row = info.vertical.start; row <= info.vertical.end; row += 1) {
+    if (row !== info.row) {
+      cells.push({ row, column: info.column });
+    }
+  }
+  return cells;
+}
+
+function crossOutlinePath(info: CrosshairInfo, metrics: BoardMetrics): string {
+  const size = metrics.cellSize;
+  const next = new Map<string, readonly [number, number]>();
+  const addEdge = (x1: number, y1: number, x2: number, y2: number): void => {
+    next.set(`${x1},${y1}`, [x2, y2]);
+  };
+  for (const { row, column } of crossCells(info)) {
+    const x = metrics.rowClueWidth + column * size;
+    const y = metrics.columnHeaderHeight + row * size;
+    if (!isCrossCell(info, row - 1, column)) {
+      addEdge(x, y, x + size, y);
+    }
+    if (!isCrossCell(info, row, column + 1)) {
+      addEdge(x + size, y, x + size, y + size);
+    }
+    if (!isCrossCell(info, row + 1, column)) {
+      addEdge(x + size, y + size, x, y + size);
+    }
+    if (!isCrossCell(info, row, column - 1)) {
+      addEdge(x, y + size, x, y);
+    }
+  }
+
+  const start = next.keys().next().value;
+  if (start === undefined) {
+    return '';
+  }
+  let path = '';
+  let key = start;
+  for (let step = 0; step <= next.size; step += 1) {
+    const [x, y] = key.split(',').map(Number) as [number, number];
+    path += `${step === 0 ? 'M' : 'L'}${x} ${y}`;
+    const following = next.get(key);
+    if (following === undefined) {
+      break;
+    }
+    key = `${following[0]},${following[1]}`;
+    if (key === start) {
+      break;
+    }
+  }
+  return `${path}Z`;
 }

@@ -21,18 +21,37 @@ export type LineAnalysis =
       readonly flexibility: number;
     };
 
+export type SolveStep =
+  | {
+      readonly kind: 'assign';
+      readonly row: number;
+      readonly column: number;
+      readonly value: 'filled' | 'empty';
+      readonly source: 'line' | 'guess';
+      readonly depth: number;
+    }
+  | { readonly kind: 'contradiction'; readonly depth: number };
+
+export interface SolveTrace {
+  readonly steps: readonly SolveStep[];
+  /** False when the trace was cut short by MAX_TRACE_STEPS and cannot be replayed faithfully. */
+  readonly complete: boolean;
+}
+
 export type SolveResult =
   | {
       readonly status: 'solved';
       readonly grid: readonly (readonly CellState[])[];
       readonly visitedNodes: number;
+      readonly trace: SolveTrace;
     }
-  | { readonly status: 'unsatisfiable'; readonly visitedNodes: number }
-  | { readonly status: 'search-limit'; readonly visitedNodes: number }
+  | { readonly status: 'unsatisfiable'; readonly visitedNodes: number; readonly trace: SolveTrace }
+  | { readonly status: 'search-limit'; readonly visitedNodes: number; readonly trace: SolveTrace }
   | { readonly status: 'invalid-puzzle'; readonly message: string };
 
 export const MAX_PUZZLE_DIMENSION = 60;
 const DEFAULT_NODE_LIMIT = 100_000;
+const MAX_TRACE_STEPS = 200_000;
 
 /**
  * Computes the projection of all clue-compatible strings onto each cell.
@@ -341,12 +360,22 @@ export function solvePuzzle(
   }
 
   let visitedNodes = 0;
+  const steps: SolveStep[] = [];
+  let traceComplete = true;
+  const record = (step: SolveStep): void => {
+    if (steps.length >= MAX_TRACE_STEPS) {
+      traceComplete = false;
+      return;
+    }
+    steps.push(step);
+  };
   const initialGrid = Array.from({ length: puzzle.height }, () =>
     Array<CellState>(puzzle.width).fill('unknown'),
   );
 
   const search = (
     grid: CellState[][],
+    depth: number,
   ):
     | { readonly status: 'solved'; readonly grid: CellState[][] }
     | { readonly status: 'unsatisfiable' }
@@ -356,8 +385,11 @@ export function solvePuzzle(
     }
     visitedNodes += 1;
 
-    const propagation = propagate(grid, puzzle);
+    const propagation = propagate(grid, puzzle, (row, column, value) => {
+      record({ kind: 'assign', row, column, value, source: 'line', depth });
+    });
     if (propagation === null) {
+      record({ kind: 'contradiction', depth });
       return { status: 'unsatisfiable' };
     }
 
@@ -390,28 +422,39 @@ export function solvePuzzle(
         return { status: 'unsatisfiable' };
       }
       branchLine[branchColumn] = assumption;
+      record({
+        kind: 'assign',
+        row: branchRow,
+        column: branchColumn,
+        value: assumption,
+        source: 'guess',
+        depth: depth + 1,
+      });
 
-      const result = search(branch);
+      const result = search(branch, depth + 1);
       if (result.status !== 'unsatisfiable') {
         return result;
       }
     }
 
+    record({ kind: 'contradiction', depth });
     return { status: 'unsatisfiable' };
   };
 
-  const result = search(initialGrid);
+  const result = search(initialGrid, 0);
+  const trace: SolveTrace = { steps, complete: traceComplete };
   switch (result.status) {
     case 'solved':
       return {
         status: 'solved',
         grid: result.grid,
         visitedNodes,
+        trace,
       };
     case 'unsatisfiable':
-      return { status: 'unsatisfiable', visitedNodes };
+      return { status: 'unsatisfiable', visitedNodes, trace };
     case 'search-limit':
-      return { status: 'search-limit', visitedNodes };
+      return { status: 'search-limit', visitedNodes, trace };
   }
 }
 
@@ -450,7 +493,13 @@ interface PropagationSummary {
   readonly columnFlexibilities: readonly number[];
 }
 
-function propagate(grid: CellState[][], puzzle: Puzzle): PropagationSummary | null {
+type AssignHandler = (row: number, column: number, value: 'filled' | 'empty') => void;
+
+function propagate(
+  grid: CellState[][],
+  puzzle: Puzzle,
+  onAssign: AssignHandler,
+): PropagationSummary | null {
   const lineCount = puzzle.height + puzzle.width;
   const queue: number[] = [];
   const queued = new Array<boolean>(lineCount).fill(false);
@@ -508,9 +557,11 @@ function propagate(grid: CellState[][], puzzle: Puzzle): PropagationSummary | nu
         if (cell === 'unknown') {
           if (!support.canBeFilled) {
             line[column] = 'empty';
+            onAssign(row, column, 'empty');
             enqueue(puzzle.height + column);
           } else if (!support.canBeEmpty) {
             line[column] = 'filled';
+            onAssign(row, column, 'filled');
             enqueue(puzzle.height + column);
           }
         }
@@ -557,9 +608,11 @@ function propagate(grid: CellState[][], puzzle: Puzzle): PropagationSummary | nu
         }
         if (!support.canBeFilled) {
           targetRow[column] = 'empty';
+          onAssign(row, column, 'empty');
           enqueue(row);
         } else if (!support.canBeEmpty) {
           targetRow[column] = 'filled';
+          onAssign(row, column, 'filled');
           enqueue(row);
         }
       }
