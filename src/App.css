@@ -240,7 +240,22 @@
   border-top: 1px solid var(--hair);
 }
 
-.replay-controls { display: flex; gap: 8px; }
+.replay-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+.speed-group { display: flex; overflow: hidden; border: 1px solid var(--hair); border-radius: 3px; }
+.speed-button {
+  height: 32px;
+  padding: 0 10px;
+  color: var(--mute);
+  background: var(--paper);
+  border: 0;
+  border-right: 1px solid var(--hair);
+  font: 11px var(--mono);
+  transition: background-color .15s ease, color .15s ease;
+}
+.speed-button:last-child { border-right: 0; }
+.speed-button:hover:not(.is-active) { color: var(--ink); }
+.speed-button.is-active { color: var(--paper); background: var(--ink); }
 
 .status {
   flex: 1 1 200px;

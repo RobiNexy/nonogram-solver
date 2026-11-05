@@ -35,6 +35,18 @@ export class SolveReplay {
     return this.nextIndex >= this.steps.length;
   }
 
+  get position(): number {
+    return this.nextIndex;
+  }
+
+  seek(target: number): void {
+    const clamped = Math.max(0, Math.min(this.steps.length, target));
+    if (clamped < this.nextIndex) {
+      this.restart();
+    }
+    this.advance(clamped - this.nextIndex);
+  }
+
   advance(count: number): void {
     const end = Math.min(this.steps.length, this.nextIndex + count);
     for (; this.nextIndex < end; this.nextIndex += 1) {

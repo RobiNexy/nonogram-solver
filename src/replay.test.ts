@@ -82,6 +82,36 @@ describe('SolveReplay', () => {
     expect(replay.guess.flat().some((isGuess) => isGuess)).toBe(false);
   });
 
+  it('seeks forward and backward to any step', () => {
+    const result = solvePuzzle({
+      width: 3,
+      height: 3,
+      rowClues: [[1], [1], [1]],
+      columnClues: [[1], [1], [1]],
+    });
+    expect(result.status).toBe('solved');
+    if (result.status !== 'solved') {
+      return;
+    }
+
+    const replay = new SolveReplay(3, 3, result.trace.steps);
+    const total = replay.total;
+    replay.seek(total);
+    expect(replay.position).toBe(total);
+    const finalGrid = replay.grid.map((row) => [...row]);
+
+    const middle = Math.floor(total / 2);
+    replay.seek(middle);
+    expect(replay.position).toBe(middle);
+    replay.seek(0);
+    expect(replay.position).toBe(0);
+    expect(replay.grid.flat().every((cell) => cell === 'unknown')).toBe(true);
+
+    replay.seek(total + 10);
+    expect(replay.position).toBe(total);
+    expect(replay.grid).toEqual(finalGrid);
+  });
+
   it('advances incrementally and reports progress', () => {
     const result = solvePuzzle({
       width: 2,

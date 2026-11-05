@@ -31,6 +31,7 @@ const MAX_CELL_SIZE = 72;
 const TOOLTIP_WIDTH = 116;
 const PLAYBACK_INTERVAL_MS = 50;
 const PLAYBACK_TICKS = 120;
+const PLAYBACK_SPEEDS = [0.5, 1, 2, 4, 8] as const;
 
 type SolveMessage =
   | { readonly kind: 'solved'; readonly nodes: number }
@@ -136,6 +137,7 @@ export default function App() {
   const [solveCount, setSolveCount] = useState(0);
   const [replay, setReplay] = useState<SolveReplay | null>(null);
   const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState<number>(1);
   const [, setReplayTick] = useState(0);
   const boardAreaRef = useRef<HTMLDivElement>(null);
   const [boardMetrics, setBoardMetrics] = useState<BoardMetrics>(INITIAL_BOARD_METRICS);
@@ -314,16 +316,20 @@ export default function App() {
     if (replay === null || !playing) {
       return undefined;
     }
-    const stepsPerTick = Math.max(1, Math.ceil(replay.total / PLAYBACK_TICKS));
+    const stepsPerTick = Math.max(1, Math.ceil(replay.total / PLAYBACK_TICKS)) * speed;
+    let carry = 0;
     const timer = window.setInterval(() => {
-      replay.advance(stepsPerTick);
+      carry += stepsPerTick;
+      const count = Math.floor(carry);
+      carry -= count;
+      replay.advance(count);
       setReplayTick((tick) => tick + 1);
       if (replay.done) {
         setPlaying(false);
       }
     }, PLAYBACK_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [playing, replay]);
+  }, [playing, replay, speed]);
 
   const toggleReplay = (): void => {
     if (replay === null) {
@@ -343,6 +349,24 @@ export default function App() {
       return;
     }
     replay.finish();
+    setPlaying(false);
+    setReplayTick((tick) => tick + 1);
+  };
+
+  const stepForward = (): void => {
+    if (replay === null) {
+      return;
+    }
+    replay.advance(1);
+    setPlaying(false);
+    setReplayTick((tick) => tick + 1);
+  };
+
+  const stepBackward = (): void => {
+    if (replay === null) {
+      return;
+    }
+    replay.seek(replay.position - 1);
     setPlaying(false);
     setReplayTick((tick) => tick + 1);
   };
@@ -603,8 +627,24 @@ export default function App() {
           <div className="replay-controls">
             {replay !== null && (
               <>
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={stepBackward}
+                  disabled={replay.position === 0}
+                >
+                  上一步
+                </button>
                 <button className="ghost-button" type="button" onClick={toggleReplay}>
                   {replay.done ? '重播' : playing ? '暂停' : '播放'}
+                </button>
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={stepForward}
+                  disabled={replay.done}
+                >
+                  下一步
                 </button>
                 <button
                   className="ghost-button"
@@ -614,6 +654,19 @@ export default function App() {
                 >
                   跳到结果
                 </button>
+                <div className="speed-group" role="group" aria-label="播放速度">
+                  {PLAYBACK_SPEEDS.map((value) => (
+                    <button
+                      key={value}
+                      className={`speed-button${value === speed ? ' is-active' : ''}`}
+                      type="button"
+                      aria-pressed={value === speed}
+                      onClick={() => setSpeed(value)}
+                    >
+                      {value}×
+                    </button>
+                  ))}
+                </div>
               </>
             )}
           </div>
